@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""
+Novel Crawler for xbanxia.cc
+Crawls novels and posts them to WordPress via REST API
+"""
+
+import sys
+import os
+import json
+import time
+from translator import Translator
+from parser import NovelParser
+from wordpress_api import WordPressAPI
+from file_manager import FileManager
+from config_loader import load_config
+
+
+class NovelCrawler:
+    def __init__(self, config_path='config.json'):
+        """Initialize the crawler with configuration"""
+        self.config = load_config(config_path)
+        
+        # Configuration
+        self.wordpress_url = self.config['wordpress_url']
+        self.api_key = self.config['api_key']
+        self.google_project_id = self.config.get('google_project_id', '')
+        self.google_credentials_file = self.config.get('google_credentials_file', '')
+        self.max_chapters = self.config.get('max_chapters_per_run', 5)
+        self.delay = self.config.get('delay_between_requests', 2)
+        self.should_translate = self.config.get('translate', False)
+        self.target_language = self.config.get('target_language', 'en')
+        
+        # Initialize modules
+        self.translator = None
+        if self.should_translate and self.google_project_id:
+            # Build credentials file path
+            import os
+            if self.google_credentials_file:
+                cred_file = os.path.join(os.path.dirname(__file__), self.google_credentials_file)
+            else:
+                cred_file = None
+            self.translator = Translator(self.google_project_id, self.log, cred_file)
+        
+        self.parser = NovelParser(self.log)
+        self.wordpress = WordPressAPI(self.wordpress_url, self.api_key, self.log)
+        self.file_manager = FileManager(self.log)
+    
+    def log(self, message):
+        """Print log message with Unicode error handling"""
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            print(message.encode('ascii', 'replace').decode('ascii'))
+    
+    def crawl_category(self, category_url, max_pages=None):
+        """Crawl all novels from a category page with pagination"""
+        self.log("\n" + "="*50)
+        self.log("Starting Category Crawler")
+        self.log("="*50 + "\n")
+        self.log(f"Category URL: {category_url}\n")
+        
+        current_url = category_url
+        page_count = 0
+        total_novels_processed = 0
+        
+        while current_url:
+            page_count += 1
+            
+            # Stop if max_pages limit reached
+            if max_pages and page_count > max_pages:
+                self.log(f"\n✓ Reached max pages limit ({max_pages})")
+                break
+            
+            try:
+                # Parse category page
+                self.log(f"\n{'='*50}")
+                self.log(f"Processing Page {page_count}")
+                self.log(f"{'='*50}")
+                self.log(f"URL: {current_url}\n")
+                
+                novels, pagination = self.parser.parse_category_page(current_url)
+                
+                self.log(f"Found {len(novels)} novels on page {pagination['current']}/{pagination['total']}")
+                
+                # Process each novel on this page
+                for idx, novel_url in enumerate(novels, 1):
+                    self.log(f"\n--- Novel {idx}/{len(novels)} on Page {page_count} ---")
+                    self.log(f"URL: {novel_url}")
+                    
+                    try:
+                        self.crawl_novel(novel_url)
+                        total_novels_processed += 1
+                    except KeyboardInterrupt:
+                        self.log("\n\n⚠ Interrupted by user")
+                        self.log(f"Processed {total_novels_processed} novels across {page_count} pages")
+                        return
+                    except Exception as e:
+                        self.log(f"✗ Error crawling novel: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        continue
+                
+                # Move to next page
+                current_url = pagination.get('next')
+                
+                if current_url:
+                    self.log(f"\n→ Moving to next page: {current_url}")
+                    time.sleep(self.delay)  # Delay between pages
+                else:
+                    self.log(f"\n✓ Reached last page ({pagination['current']}/{pagination['total']})")
+                    break
+                    
+            except KeyboardInterrupt:
+                self.log("\n\n⚠ Interrupted by user")
+                self.log(f"Processed {total_novels_processed} novels across {page_count} pages")
+                return
+            except Exception as e:
+                self.log(f"\n✗ Error processing page: {e}")
+                import traceback
+                traceback.print_exc()
+                break
+        
+        self.log("\n" + "="*50)
+        self.log("Category Crawling Complete!")
+        self.log("="*50)
+        self.log(f"Total pages processed: {page_count}")
+        self.log(f"Total novels processed: {total_novels_processed}")
+        self.log("")
+    
+    def crawl_novel(self, novel_url):
+        """Main crawling process"""
+        self.log("\n" + "="*50)
+        self.log("Starting Novel Crawler")
+        self.log("="*50 + "\n")
+        
+        # Check crawler state for this novel
+        crawler_state = self.file_manager.load_crawler_state()
+        novel_progress = crawler_state['processed_novels'].get(novel_url, {})
+        
+        resume_from_chapter = 0
+        
+        # Check if novel is truly completed (all chapters processed)
+        if novel_progress.get('status') == 'completed':
+            chapters_crawled = novel_progress.get('chapters_crawled', 0)
+            chapters_total = novel_progress.get('chapters_total', 0)
+            
+            # Only skip if all chapters are truly done
+            if chapters_crawled >= chapters_total:
+                self.log(f"✓ Novel already fully completed: {novel_url}")
+                self.log(f"  All {chapters_crawled}/{chapters_total} chapters processed")
+                self.log(f"  Story ID: {novel_progress.get('story_id')}")
+                return
+            else:
+                # Marked completed but not all chapters done - resume
+                self.log(f"⟳ Novel marked completed but has more chapters: {novel_url}")
+                self.log(f"  Resuming from chapter {chapters_crawled + 1}")
+                resume_from_chapter = chapters_crawled
+        
+        if novel_progress.get('status') == 'in_progress':
+            resume_from_chapter = novel_progress.get('chapters_crawled', 0)
+            self.log(f"⟳ Resuming novel: {novel_url}")
+            self.log(f"  Continuing from chapter {resume_from_chapter + 1}")
+            self.log(f"  Progress: {resume_from_chapter}/{novel_progress.get('chapters_total')} chapters")
+        
+        # Step 1: Test WordPress connection
+        self.log("[1/6] Testing WordPress API connection...")
+        success, result = self.wordpress.test_connection()
+        if success:
+            self.log(f"  Connected (WordPress v{result.get('wordpress', 'unknown')})")
+        else:
+            self.log(f"  Failed: {result}")
+            return
+        
+        # Step 2: Fetch and parse novel page
+        self.log("\n[2/6] Fetching novel page...")
+        novel_data, novel_id = self.parser.parse_novel_page(novel_url)
+        self.log(f"  Fetched ({len(str(novel_data))} bytes)")
+        
+        # Step 3: Parse novel data
+        self.log("\n[3/6] Parsing novel data...")
+        self.log(f"  Title: {novel_data['title']}")
+        self.log(f"  Author: {novel_data['author']}")
+        self.log(f"  Chapters found: {len(novel_data['chapters'])}")
+        
+        # Step 4: Translate novel metadata
+        self.log("\n[4/6] Translating novel metadata...")
+        if self.should_translate and self.translator and self.translator.client:
+            # Check if already translated in metadata
+            existing_metadata_path = os.path.join('novels', f'novel_{novel_id}', 'metadata.json')
+            if os.path.exists(existing_metadata_path):
+                try:
+                    with open(existing_metadata_path, 'r', encoding='utf-8') as f:
+                        existing_meta = json.load(f)
+                        if existing_meta.get('title_translated'):
+                            translated_title = existing_meta['title_translated']
+                            translated_description = existing_meta.get('description_translated', novel_data['description'])
+                            self.log(f"  Using cached translation: {translated_title}")
+                        else:
+                            translated_title = self.translator.translate(novel_data['title'])
+                            translated_description = self.translator.translate(novel_data['description'])
+                            self.log(f"  Title (EN): {translated_title}")
+                except:
+                    translated_title = self.translator.translate(novel_data['title'])
+                    translated_description = self.translator.translate(novel_data['description'])
+                    self.log(f"  Title (EN): {translated_title}")
+            else:
+                translated_title = self.translator.translate(novel_data['title'])
+                translated_description = self.translator.translate(novel_data['description'])
+                self.log(f"  Title (EN): {translated_title}")
+        else:
+            translated_title = novel_data['title']
+            translated_description = novel_data['description']
+            self.log("  Translation disabled")
+        
+        # Save metadata
+        metadata = {
+            'title': novel_data['title'],
+            'title_translated': translated_title,
+            'author': novel_data['author'],
+            'description': novel_data['description'],
+            'description_translated': translated_description,
+            'type': novel_data['type'],
+            'status': novel_data['status'],
+            'cover_url': novel_data['cover_url'],
+            'source_url': novel_url,
+            'total_chapters': len(novel_data['chapters'])
+        }
+        self.file_manager.save_metadata(novel_id, metadata)
+        
+        # Step 5: Create story in WordPress
+        self.log("\n[5/6] Creating story in WordPress...")
+        # Download cover image if available
+        cover_path = None
+        if novel_data['cover_url']:
+            try:
+                cover_filename = self.file_manager.download_cover(novel_id, novel_data['cover_url'])
+                cover_path = os.path.join('novels', f'novel_{novel_id}', cover_filename)
+                self.log(f"  Cover downloaded: {cover_filename}")
+            except Exception as e:
+                self.log(f"  Failed to download cover: {e}")
+        
+        story_data = {
+            'title': translated_title,
+            'description': translated_description,
+            'title_zh': novel_data['title'],
+            'author': novel_data['author'],
+            'url': novel_url,
+            'cover_url': novel_data['cover_url'],
+            'cover_path': cover_path
+        }
+        
+        story_result = self.wordpress.create_story(story_data)
+        story_id = story_result['id']
+        
+        if story_result.get('existed'):
+            self.log(f"  Story already exists (ID: {story_id})")
+        else:
+            self.log(f"  Story created (ID: {story_id})")
+        
+        # Step 6: Process chapters
+        self.log(f"\n[6/6] Processing chapters (max {self.max_chapters})...")
+        
+        # Create chapter directories
+        self.file_manager.create_directories(novel_id)
+        
+        chapters_created = 0
+        chapters_existed = 0
+        
+        # Store novel titles for chapter filenames
+        novel_title_raw = novel_data['title']
+        novel_title_translated = translated_title
+        
+        # Determine chapter range to process
+        start_chapter = resume_from_chapter + 1
+        end_chapter = min(resume_from_chapter + self.max_chapters, len(novel_data['chapters']))
+        chapters_to_process = novel_data['chapters'][resume_from_chapter:end_chapter]
+        
+        if resume_from_chapter > 0:
+            self.log(f"  Resuming from chapter {start_chapter} to {end_chapter}")
+        
+        for idx, chapter in enumerate(chapters_to_process, start=start_chapter):
+            self.log(f"\n  Chapter {idx}/{len(novel_data['chapters'])}: {chapter['title']}")
+            
+            # Parse chapter content
+            title, content = self.parser.parse_chapter_page(chapter['url'])
+            if not content:
+                self.log("    Skipped (no content found)")
+                continue
+            
+            self.log(f"    Extracted {len(content)} characters")
+            
+            # Save raw chapter
+            raw_filename = self.file_manager.save_chapter(novel_id, idx, title, content, novel_title_raw, is_translated=False)
+            self.log(f"    Saved to {raw_filename}")
+            
+            # Translate if enabled
+            if self.should_translate and self.translator and self.translator.client:
+                # Check if translated file already exists
+                translated_dir = os.path.join('novels', f'novel_{novel_id}', 'chapters_translated')
+                safe_novel_name = novel_title_translated.replace(' ', '_').replace('/', '_').replace('\\', '_')[:50]
+                translated_filepath = os.path.join(translated_dir, f"{safe_novel_name}_Chapter_{idx:03d}.html")
+                
+                if os.path.exists(translated_filepath):
+                    # Read existing translation
+                    with open(translated_filepath, 'r', encoding='utf-8') as f:
+                        translated_html = f.read()
+                        # Extract title and content from HTML
+                        import re
+                        title_match = re.search(r'<h1>(.*?)</h1>', translated_html, re.DOTALL)
+                        translated_title = title_match.group(1) if title_match else title
+                        content_match = re.search(r'</h1>\s*(.+)', translated_html, re.DOTALL)
+                        translated_content = content_match.group(1).strip() if content_match else content
+                    self.log(f"    Using cached translation")
+                else:
+                    # Retry translation with exponential backoff
+                    max_retries = 10
+                    retry_delay = 0
+                    translated_title = None
+                    translated_content = None
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            if attempt > 0:
+                                self.log(f"    Translation retry {attempt}/{max_retries} (waiting {retry_delay}s)...")
+                                time.sleep(retry_delay)
+                            
+                            translated_title = self.translator.translate(title)
+                            translated_content = self.translator.translate(content)
+                            self.log(f"    Translated")
+                            break
+                        except Exception as e:
+                            self.log(f"    Translation error: {e}")
+                            if attempt < max_retries - 1:
+                                retry_delay = min(600, 2 ** attempt)  # Max 10 minutes
+                            else:
+                                self.log(f"    CRITICAL: Translation failed after {max_retries} attempts")
+                                self.log(f"    STOPPING: Cannot proceed without translation for chapter {idx}")
+                                return
+                    
+                    if not translated_title or not translated_content:
+                        self.log(f"    CRITICAL: Translation failed for chapter {idx}")
+                        self.log(f"    STOPPING: Cannot proceed without translation")
+                        return
+            else:
+                translated_title = title
+                translated_content = content
+            
+            # Save translated chapter
+            translated_filename = self.file_manager.save_chapter(novel_id, idx, translated_title, translated_content, novel_title_translated, is_translated=True)
+            self.log(f"    Saved to {translated_filename}")
+            
+            # Create chapter in WordPress with formatted title and retry logic
+            chapter_wordpress_title = f"{novel_title_translated} Chapter {idx}"
+            chapter_data = {
+                'title': chapter_wordpress_title,
+                'title_zh': title,
+                'content': translated_content,
+                'story_id': story_id,
+                'url': chapter['url'],
+                'chapter_number': idx
+            }
+            
+            # Debug: print what we're sending
+            if idx == 6:  # Only for chapter 6 to avoid spam
+                self.log(f"    DEBUG: Sending story_id={story_id} (type: {type(story_id).__name__})")
+            
+            # Retry chapter creation with exponential backoff
+            max_retries = 10
+            retry_delay = 0
+            chapter_created = False
+            
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        self.log(f"    WordPress retry {attempt}/{max_retries} (waiting {retry_delay}s)...")
+                        time.sleep(retry_delay)
+                    
+                    chapter_result = self.wordpress.create_chapter(chapter_data)
+                    if chapter_result.get('existed'):
+                        self.log(f"    Already exists in WordPress (ID: {chapter_result['id']})")
+                        chapters_existed += 1
+                    else:
+                        self.log(f"    Created in WordPress (ID: {chapter_result['id']})")
+                        chapters_created += 1
+                    chapter_created = True
+                    break
+                except Exception as e:
+                    self.log(f"    WordPress error: {e}")
+                    if attempt < max_retries - 1:
+                        retry_delay = min(600, 2 ** attempt)  # Max 10 minutes
+                    else:
+                        self.log(f"    CRITICAL: Chapter creation failed after {max_retries} attempts")
+                        self.log(f"    STOPPING: Cannot proceed without creating chapter {idx}")
+                        return
+            
+            if not chapter_created:
+                self.log(f"    CRITICAL: Failed to create chapter {idx} in WordPress")
+                self.log(f"    STOPPING: Chapter sequence is critical, cannot continue")
+                # Update progress before stopping
+                self.file_manager.update_novel_progress(
+                    novel_url, 'failed', 
+                    chapters_crawled=idx-1, 
+                    chapters_total=len(novel_data['chapters']),
+                    story_id=story_id
+                )
+                return
+            
+            # Update progress after each successful chapter
+            self.file_manager.update_novel_progress(
+                novel_url, 'in_progress',
+                chapters_crawled=idx,
+                chapters_total=len(novel_data['chapters']),
+                story_id=story_id
+            )
+            
+            # Delay between requests (but not after the last chapter in this batch)
+            if idx < end_chapter:
+                time.sleep(self.delay)
+        
+        # Determine if novel is completed or just reached max_chapters limit
+        total_chapters_crawled = chapters_created + chapters_existed
+        if total_chapters_crawled >= len(novel_data['chapters']):
+            # All chapters processed - mark as completed
+            status = 'completed'
+            self.log("\n✓ All chapters processed!")
+        else:
+            # More chapters available - mark as in_progress
+            status = 'in_progress'
+            self.log(f"\n⚠ Reached max_chapters limit ({self.max_chapters}). {len(novel_data['chapters']) - total_chapters_crawled} chapters remaining.")
+        
+        self.file_manager.update_novel_progress(
+            novel_url, status,
+            chapters_crawled=total_chapters_crawled,
+            chapters_total=len(novel_data['chapters']),
+            story_id=story_id
+        )
+        
+        # Summary
+        self.log("\n" + "="*50)
+        self.log("Crawling Complete!")
+        self.log("="*50)
+        self.log(f"Story ID: {story_id}")
+        self.log(f"Chapters created: {chapters_created}")
+        self.log(f"Chapters existed: {chapters_existed}")
+        self.log(f"Total processed: {chapters_created + chapters_existed}")
+        self.log("")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python crawler.py <url> [max_pages]")
+        print("\nExamples:")
+        print("  Novel:    python crawler.py https://www.xbanxia.cc/books/396941.html")
+        print("  Category: python crawler.py https://www.xbanxia.cc/list/1_1.html")
+        print("  Category: python crawler.py https://www.xbanxia.cc/list/1_1.html 5")
+        sys.exit(1)
+    
+    url = sys.argv[1]
+    max_pages = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    
+    try:
+        crawler = NovelCrawler()
+        
+        # Detect URL type and call appropriate method
+        if '/list/' in url:
+            # Category URL
+            crawler.crawl_category(url, max_pages)
+        elif '/books/' in url:
+            # Novel URL
+            crawler.crawl_novel(url)
+        else:
+            print(f"Error: Unknown URL type: {url}")
+            print("URL should contain either '/list/' (category) or '/books/' (novel)")
+            sys.exit(1)
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

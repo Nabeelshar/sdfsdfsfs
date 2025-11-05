@@ -1,0 +1,64 @@
+name: Novel Crawler
+
+on:
+  # Run every 6 hours
+  schedule:
+    - cron: '0 */6 * * *'  # At minute 0 past every 6th hour
+  
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      category_url:
+        description: 'Category URL to crawl (optional)'
+        required: false
+        default: 'https://www.xbanxia.cc/list/1_1.html'
+      max_pages:
+        description: 'Max pages to crawl (optional)'
+        required: false
+        default: '5'
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          cd crawler
+          pip install -r requirements.txt
+      
+      - name: Set up Google Cloud credentials
+        run: |
+          cd crawler
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > jadepetals-1b7f6ae3a0ad.json
+      
+      - name: Run crawler
+        run: |
+          cd crawler
+          python crawler.py ${{ github.event.inputs.category_url || 'https://www.xbanxia.cc/list/1_1.html' }} ${{ github.event.inputs.max_pages || '5' }}
+      
+      - name: Upload crawler state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawler-state-${{ github.run_number }}
+          path: crawler/crawler_state.json
+          retention-days: 30
+      
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-logs-${{ github.run_number }}
+          path: crawler/*.log
+          retention-days: 7
