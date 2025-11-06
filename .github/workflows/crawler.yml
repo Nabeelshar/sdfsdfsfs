@@ -37,6 +37,13 @@ jobs:
           cd crawler
           pip install -r requirements.txt
       
+      - name: Set up config
+        run: |
+          cd crawler
+          if [ ! -f config.json ]; then
+            cp config.json.template config.json
+          fi
+      
       - name: Run crawler
         env:
           WORDPRESS_API_KEY: ${{ secrets.WORDPRESS_API_KEY }}

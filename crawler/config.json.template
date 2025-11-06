@@ -1,0 +1,10 @@
+{
+  "wordpress_url": "https://mtlblnovels.com",
+  "api_key": "PLACEHOLDER_USE_ENVIRONMENT_VARIABLE",
+  "google_project_id": "",
+  "google_credentials_file": "",
+  "max_chapters_per_run": 999,
+  "delay_between_requests": 2,
+  "translate": true,
+  "target_language": "en"
+}
