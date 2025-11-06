@@ -43,6 +43,29 @@ class WordPressAPI:
         else:
             raise Exception(f"Failed to create story: {response.status_code} - {response.text}")
     
+    def check_chapter_exists(self, story_id, chapter_number):
+        """Check if chapter already exists in WordPress"""
+        try:
+            response = requests.get(
+                f"{self.wordpress_url}/wp-json/crawler/v1/chapter/exists",
+                headers={'X-API-Key': self.api_key},
+                params={'story_id': story_id, 'chapter_number': chapter_number},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    'exists': result.get('exists', False),
+                    'chapter_id': result.get('chapter_id')
+                }
+            else:
+                # If endpoint doesn't exist, fallback to False (will crawl)
+                return {'exists': False, 'chapter_id': None}
+        except:
+            # On error, assume doesn't exist (safer to crawl)
+            return {'exists': False, 'chapter_id': None}
+    
     def create_chapter(self, chapter_data):
         """Create chapter in WordPress"""
         response = requests.post(

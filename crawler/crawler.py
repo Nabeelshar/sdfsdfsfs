@@ -281,6 +281,13 @@ class NovelCrawler:
         for idx, chapter in enumerate(chapters_to_process, start=start_chapter):
             self.log(f"\n  Chapter {idx}/{len(novel_data['chapters'])}: {chapter['title']}")
             
+            # Check if chapter already exists in WordPress FIRST
+            chapter_check = self.wordpress.check_chapter_exists(story_id, idx)
+            if chapter_check['exists']:
+                self.log(f"    ✓ Already in WordPress (ID: {chapter_check['chapter_id']}) - Skipped crawl/translate")
+                chapters_existed += 1
+                continue
+            
             # Parse chapter content
             title, content = self.parser.parse_chapter_page(chapter['url'])
             if not content:
