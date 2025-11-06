@@ -32,14 +32,22 @@ class NovelCrawler:
         
         # Initialize modules
         self.translator = None
-        if self.should_translate and self.google_project_id:
-            # Build credentials file path
+        if self.should_translate:
+            # Always initialize translator when translation is needed
+            # project_id and credentials_file can be None (googletrans doesn't need them)
             import os
             if self.google_credentials_file:
                 cred_file = os.path.join(os.path.dirname(__file__), self.google_credentials_file)
             else:
                 cred_file = None
             self.translator = Translator(self.google_project_id, self.log, cred_file)
+        
+        # CRITICAL: Verify translator initialized
+        if self.should_translate:
+            if not self.translator or not self.translator.client:
+                self.log("CRITICAL ERROR: Translation Required But Unavailable")
+                self.log("Please check if googletrans==4.0.0rc1 is installed: pip install googletrans==4.0.0rc1")
+                raise Exception("Translation service initialization failed")
         
         self.parser = NovelParser(self.log)
         self.wordpress = WordPressAPI(self.wordpress_url, self.api_key, self.log)
