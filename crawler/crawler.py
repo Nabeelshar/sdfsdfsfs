@@ -282,20 +282,18 @@ class NovelCrawler:
         }
         self.file_manager.save_metadata(novel_id, metadata)
         
-        # Update WordPress story with translated title if different from original
-        # This handles both new stories and existing stories that need translation updates
-        if translated_title != novel_data['title'] or not story_result.get('existed'):
-            story_data_update = {
-                'title': translated_title,
-                'description': translated_description,
-                'title_zh': novel_data['title'],
-                'author': novel_data['author'],
-                'url': novel_url,
-                'cover_url': novel_data['cover_url'],
-                'cover_path': cover_path
-            }
-            # Update story in WordPress (create_story handles both create and update)
-            self.wordpress.create_story(story_data_update)
+        # Always update WordPress story with complete metadata after translation/download
+        # This ensures cover, description, and translated title are all up-to-date
+        story_data_final = {
+            'title': translated_title,
+            'description': translated_description,
+            'title_zh': novel_data['title'],
+            'author': novel_data['author'],
+            'url': novel_url,
+            'cover_url': novel_data['cover_url'],
+            'cover_path': cover_path
+        }
+        self.wordpress.create_story(story_data_final)
         
         # Step 6: Process chapters
         self.log(f"\n[6/6] Processing chapters (max {self.max_chapters})...")
