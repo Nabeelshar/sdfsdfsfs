@@ -190,8 +190,8 @@ class NovelCrawler:
         self.log(f"  Author: {novel_data['author']}")
         self.log(f"  Chapters found: {len(novel_data['chapters'])}")
         
-        # Step 4: Translate title first (lightweight check)
-        self.log("\n[4/6] Translating title for lookup...")
+        # Step 4: Translate title and description
+        self.log("\n[4/6] Translating metadata...")
         if self.should_translate and self.translator and self.translator.client:
             # Check if already translated in metadata
             existing_metadata_path = os.path.join('novels', f'novel_{novel_id}', 'metadata.json')
@@ -201,25 +201,37 @@ class NovelCrawler:
                         existing_meta = json.load(f)
                         if existing_meta.get('title_translated'):
                             translated_title = existing_meta['title_translated']
-                            self.log(f"  Using cached translation: {translated_title}")
+                            self.log(f"  Using cached title: {translated_title}")
                         else:
                             translated_title = self.translator.translate(novel_data['title'])
                             self.log(f"  Title (EN): {translated_title}")
+                        
+                        if existing_meta.get('description_translated'):
+                            translated_description = existing_meta['description_translated']
+                            self.log(f"  Using cached description")
+                        else:
+                            translated_description = self.translator.translate(novel_data['description'])
+                            self.log(f"  Description (EN): Translated")
                 except:
                     translated_title = self.translator.translate(novel_data['title'])
+                    translated_description = self.translator.translate(novel_data['description'])
                     self.log(f"  Title (EN): {translated_title}")
+                    self.log(f"  Description (EN): Translated")
             else:
                 translated_title = self.translator.translate(novel_data['title'])
+                translated_description = self.translator.translate(novel_data['description'])
                 self.log(f"  Title (EN): {translated_title}")
+                self.log(f"  Description (EN): Translated")
         else:
             translated_title = novel_data['title']
+            translated_description = novel_data['description']
             self.log("  Translation disabled")
         
         # Step 5: Check if story exists in WordPress using translated title
         self.log("\n[5/6] Checking if story exists...")
         story_data_check = {
             'title': translated_title,  # Use translated title for lookup
-            'description': '',  # Don't set description yet, will set after translation
+            'description': translated_description,  # Use translated description
             'title_zh': novel_data['title'],
             'author': novel_data['author'],
             'url': novel_url,
@@ -233,7 +245,7 @@ class NovelCrawler:
         if story_result.get('existed'):
             self.log(f"  Story exists (ID: {story_id})")
             
-            # 🚀 OPTIMIZATION: Check if all chapters exist BEFORE translating description/downloading
+            # 🚀 OPTIMIZATION: Check if all chapters exist BEFORE downloading cover
             chapter_status = self.wordpress.get_story_chapter_status(story_id, len(novel_data['chapters']))
             
             if chapter_status['success'] and chapter_status['is_complete']:
@@ -249,30 +261,8 @@ class NovelCrawler:
         else:
             self.log(f"  Story created (ID: {story_id})")
         
-        # Only translate description and download cover if we're processing chapters
-        self.log("\n[5/6] Translating description and downloading cover...")
-        if self.should_translate and self.translator and self.translator.client:
-            # Check if description already translated in metadata
-            existing_metadata_path = os.path.join('novels', f'novel_{novel_id}', 'metadata.json')
-            if os.path.exists(existing_metadata_path):
-                try:
-                    with open(existing_metadata_path, 'r', encoding='utf-8') as f:
-                        existing_meta = json.load(f)
-                        if existing_meta.get('description_translated'):
-                            translated_description = existing_meta['description_translated']
-                            self.log(f"  Using cached description translation")
-                        else:
-                            translated_description = self.translator.translate(novel_data['description'])
-                            self.log(f"  Description translated")
-                except:
-                    translated_description = self.translator.translate(novel_data['description'])
-                    self.log(f"  Description translated")
-            else:
-                translated_description = self.translator.translate(novel_data['description'])
-                self.log(f"  Description translated")
-        else:
-            translated_description = novel_data['description']
-        
+        # Only download cover if we're processing chapters
+        self.log("\n[5/6] Downloading cover...")
         # Download cover image if available
         cover_path = None
         if novel_data['cover_url']:
