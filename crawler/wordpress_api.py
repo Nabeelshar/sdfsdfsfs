@@ -43,6 +43,31 @@ class WordPressAPI:
         else:
             raise Exception(f"Failed to create story: {response.status_code} - {response.text}")
     
+    def get_story_chapter_status(self, story_id, total_chapters):
+        """Get bulk status of all chapters for a story (FAST!)"""
+        try:
+            response = requests.get(
+                f"{self.wordpress_url}/wp-json/crawler/v1/story/{story_id}/chapters",
+                headers={'X-API-Key': self.api_key},
+                params={'total_chapters': total_chapters},
+                timeout=15
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return {
+                    'success': True,
+                    'chapters_count': result.get('chapters_count', 0),
+                    'is_complete': result.get('is_complete', False),
+                    'existing_chapters': result.get('existing_chapters', [])  # List of chapter numbers
+                }
+            else:
+                # Fallback to individual checks
+                return {'success': False, 'chapters_count': 0, 'is_complete': False, 'existing_chapters': []}
+        except:
+            # Fallback to individual checks
+            return {'success': False, 'chapters_count': 0, 'is_complete': False, 'existing_chapters': []}
+    
     def check_chapter_exists(self, story_id, chapter_number):
         """Check if chapter already exists in WordPress"""
         try:

@@ -278,15 +278,42 @@ class NovelCrawler:
         if resume_from_chapter > 0:
             self.log(f"  Resuming from chapter {start_chapter} to {end_chapter}")
         
+        # 🚀 BULK CHECK: Get all existing chapters at once (MUCH FASTER!)
+        self.log("  Checking WordPress for existing chapters...")
+        chapter_status = self.wordpress.get_story_chapter_status(story_id, len(novel_data['chapters']))
+        
+        if chapter_status['success']:
+            if chapter_status['is_complete']:
+                self.log(f"  ✓✓✓ NOVEL COMPLETE! All {chapter_status['chapters_count']} chapters exist - SKIPPING ENTIRE NOVEL! ✓✓✓")
+                # Update progress to mark as complete
+                self.file_manager.update_novel_progress(novel_id, len(novel_data['chapters']))
+                return
+            elif chapter_status['chapters_count'] > 0:
+                self.log(f"  Found {chapter_status['chapters_count']} existing chapters - will skip those")
+                existing_chapter_set = set(chapter_status['existing_chapters'])
+            else:
+                existing_chapter_set = set()
+        else:
+            # Fallback: will check individually
+            self.log("  Bulk check unavailable - checking chapters individually")
+            existing_chapter_set = None
+        
         for idx, chapter in enumerate(chapters_to_process, start=start_chapter):
             self.log(f"\n  Chapter {idx}/{len(novel_data['chapters'])}: {chapter['title']}")
             
-            # Check if chapter already exists in WordPress FIRST
-            chapter_check = self.wordpress.check_chapter_exists(story_id, idx)
-            if chapter_check['exists']:
-                self.log(f"    ✓ Already in WordPress (ID: {chapter_check['chapter_id']}) - Skipped crawl/translate")
-                chapters_existed += 1
-                continue
+            # Check if chapter exists (use bulk result if available)
+            if existing_chapter_set is not None:
+                if idx in existing_chapter_set:
+                    self.log(f"    ✓ Already in WordPress - Skipped crawl/translate")
+                    chapters_existed += 1
+                    continue
+            else:
+                # Fallback to individual check
+                chapter_check = self.wordpress.check_chapter_exists(story_id, idx)
+                if chapter_check['exists']:
+                    self.log(f"    ✓ Already in WordPress (ID: {chapter_check['chapter_id']}) - Skipped crawl/translate")
+                    chapters_existed += 1
+                    continue
             
             # Parse chapter content
             title, content = self.parser.parse_chapter_page(chapter['url'])
