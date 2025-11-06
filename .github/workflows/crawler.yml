@@ -15,7 +15,7 @@ on:
       max_pages:
         description: 'Max pages to crawl (optional)'
         required: false
-        default: '5'
+        default: '500'
 
 jobs:
   crawl:
@@ -37,12 +37,9 @@ jobs:
           cd crawler
           pip install -r requirements.txt
       
-      - name: Set up Google Cloud credentials
-        run: |
-          cd crawler
-          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > jadepetals-1b7f6ae3a0ad.json
-      
       - name: Run crawler
+        env:
+          WORDPRESS_API_KEY: ${{ secrets.WORDPRESS_API_KEY }}
         run: |
           cd crawler
           python crawler.py ${{ github.event.inputs.category_url || 'https://www.xbanxia.cc/list/1_1.html' }} ${{ github.event.inputs.max_pages || '5' }}

@@ -19,3 +19,9 @@ Thumbs.db
 *.tmp
 *.temp
 *.cache
+
+# Sensitive configuration files
+crawler/config.json
+crawler/jadepetals*.json
+crawler/*.pem
+crawler/*.key
