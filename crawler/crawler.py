@@ -190,8 +190,45 @@ class NovelCrawler:
         self.log(f"  Author: {novel_data['author']}")
         self.log(f"  Chapters found: {len(novel_data['chapters'])}")
         
-        # Step 4: Translate novel metadata
-        self.log("\n[4/6] Translating novel metadata...")
+        # Step 4: Quick story check (lightweight - no translation/download yet)
+        self.log("\n[4/6] Checking if story exists in WordPress...")
+        
+        # Create story with minimal data first (just to check if exists)
+        story_data_check = {
+            'title': novel_data['title'],  # Use original title for now
+            'description': novel_data['description'],
+            'title_zh': novel_data['title'],
+            'author': novel_data['author'],
+            'url': novel_url,
+            'cover_url': novel_data['cover_url'],
+            'cover_path': None  # Don't download yet
+        }
+        
+        story_result = self.wordpress.create_story(story_data_check)
+        story_id = story_result['id']
+        
+        if story_result.get('existed'):
+            self.log(f"  Story exists (ID: {story_id})")
+            
+            # 🚀 OPTIMIZATION: Check if all chapters exist BEFORE translating/downloading
+            self.log("\n[5/6] Quick chapter check...")
+            chapter_status = self.wordpress.get_story_chapter_status(story_id, len(novel_data['chapters']))
+            
+            if chapter_status['success'] and chapter_status['is_complete']:
+                self.log(f"  ✓✓✓ NOVEL COMPLETE! All {chapter_status['chapters_count']} chapters exist - SKIPPING! ✓✓✓")
+                # Update progress and exit early
+                self.file_manager.update_novel_progress(novel_url, 'completed', 
+                    chapters_crawled=len(novel_data['chapters']),
+                    chapters_total=len(novel_data['chapters']),
+                    story_id=story_id)
+                return
+            else:
+                self.log(f"  Novel incomplete ({chapter_status['chapters_count']}/{len(novel_data['chapters'])} chapters) - continuing...")
+        else:
+            self.log(f"  Story created (ID: {story_id})")
+        
+        # Only translate and download if we need to process chapters
+        self.log("\n[5/6] Translating metadata and downloading cover...")
         if self.should_translate and self.translator and self.translator.client:
             # Check if already translated in metadata
             existing_metadata_path = os.path.join('novels', f'novel_{novel_id}', 'metadata.json')
@@ -220,6 +257,16 @@ class NovelCrawler:
             translated_description = novel_data['description']
             self.log("  Translation disabled")
         
+        # Download cover image if available
+        cover_path = None
+        if novel_data['cover_url']:
+            try:
+                cover_filename = self.file_manager.download_cover(novel_id, novel_data['cover_url'])
+                cover_path = os.path.join('novels', f'novel_{novel_id}', cover_filename)
+                self.log(f"  Cover downloaded: {cover_filename}")
+            except Exception as e:
+                self.log(f"  Failed to download cover: {e}")
+        
         # Save metadata
         metadata = {
             'title': novel_data['title'],
@@ -235,35 +282,20 @@ class NovelCrawler:
         }
         self.file_manager.save_metadata(novel_id, metadata)
         
-        # Step 5: Create story in WordPress
-        self.log("\n[5/6] Creating story in WordPress...")
-        # Download cover image if available
-        cover_path = None
-        if novel_data['cover_url']:
-            try:
-                cover_filename = self.file_manager.download_cover(novel_id, novel_data['cover_url'])
-                cover_path = os.path.join('novels', f'novel_{novel_id}', cover_filename)
-                self.log(f"  Cover downloaded: {cover_filename}")
-            except Exception as e:
-                self.log(f"  Failed to download cover: {e}")
-        
-        story_data = {
-            'title': translated_title,
-            'description': translated_description,
-            'title_zh': novel_data['title'],
-            'author': novel_data['author'],
-            'url': novel_url,
-            'cover_url': novel_data['cover_url'],
-            'cover_path': cover_path
-        }
-        
-        story_result = self.wordpress.create_story(story_data)
-        story_id = story_result['id']
-        
-        if story_result.get('existed'):
-            self.log(f"  Story already exists (ID: {story_id})")
-        else:
-            self.log(f"  Story created (ID: {story_id})")
+        # Update story with translated data if needed
+        if story_result.get('existed') and translated_title != novel_data['title']:
+            # Story existed but we now have translation - update it
+            story_data_update = {
+                'title': translated_title,
+                'description': translated_description,
+                'title_zh': novel_data['title'],
+                'author': novel_data['author'],
+                'url': novel_url,
+                'cover_url': novel_data['cover_url'],
+                'cover_path': cover_path
+            }
+            # Re-call create_story which will update existing story
+            self.wordpress.create_story(story_data_update)
         
         # Step 6: Process chapters
         self.log(f"\n[6/6] Processing chapters (max {self.max_chapters})...")
@@ -286,17 +318,11 @@ class NovelCrawler:
         if resume_from_chapter > 0:
             self.log(f"  Resuming from chapter {start_chapter} to {end_chapter}")
         
-        # 🚀 BULK CHECK: Get all existing chapters at once (MUCH FASTER!)
-        self.log("  Checking WordPress for existing chapters...")
+        # Get existing chapters (already checked in step 5, but get details for processing)
         chapter_status = self.wordpress.get_story_chapter_status(story_id, len(novel_data['chapters']))
         
         if chapter_status['success']:
-            if chapter_status['is_complete']:
-                self.log(f"  ✓✓✓ NOVEL COMPLETE! All {chapter_status['chapters_count']} chapters exist - SKIPPING ENTIRE NOVEL! ✓✓✓")
-                # Update progress to mark as complete
-                self.file_manager.update_novel_progress(novel_id, len(novel_data['chapters']))
-                return
-            elif chapter_status['chapters_count'] > 0:
+            if chapter_status['chapters_count'] > 0:
                 self.log(f"  Found {chapter_status['chapters_count']} existing chapters - will skip those")
                 existing_chapter_set = set(chapter_status['existing_chapters'])
             else:
