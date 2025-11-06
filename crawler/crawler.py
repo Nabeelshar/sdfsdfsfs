@@ -282,9 +282,9 @@ class NovelCrawler:
         }
         self.file_manager.save_metadata(novel_id, metadata)
         
-        # Update story with translated data if needed
-        if story_result.get('existed') and translated_title != novel_data['title']:
-            # Story existed but we now have translation - update it
+        # Update WordPress story with translated title if different from original
+        # This handles both new stories and existing stories that need translation updates
+        if translated_title != novel_data['title'] or not story_result.get('existed'):
             story_data_update = {
                 'title': translated_title,
                 'description': translated_description,
@@ -294,7 +294,7 @@ class NovelCrawler:
                 'cover_url': novel_data['cover_url'],
                 'cover_path': cover_path
             }
-            # Re-call create_story which will update existing story
+            # Update story in WordPress (create_story handles both create and update)
             self.wordpress.create_story(story_data_update)
         
         # Step 6: Process chapters
