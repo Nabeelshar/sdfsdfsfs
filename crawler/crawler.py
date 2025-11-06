@@ -219,7 +219,7 @@ class NovelCrawler:
         self.log("\n[5/6] Checking if story exists...")
         story_data_check = {
             'title': translated_title,  # Use translated title for lookup
-            'description': novel_data['description'],
+            'description': '',  # Don't set description yet, will set after translation
             'title_zh': novel_data['title'],
             'author': novel_data['author'],
             'url': novel_url,
