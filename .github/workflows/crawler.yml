@@ -49,7 +49,7 @@ jobs:
           WORDPRESS_API_KEY: ${{ secrets.WORDPRESS_API_KEY }}
         run: |
           cd crawler
-          python crawl_category.py ${{ github.event.inputs.category_url || 'https://www.xbanxia.cc/list/1_1.html' }} ${{ github.event.inputs.max_pages || '5' }}
+          python crawl_category.py ${{ github.event.inputs.category_url || 'https://www.xbanxia.cc/list/1_1.html' }} ${{ github.event.inputs.max_pages || '500' }}
       
       - name: Upload crawler state
         if: always()
