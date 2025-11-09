@@ -10,9 +10,15 @@ class WordPressAPI:
         self.wordpress_url = wordpress_url
         self.api_key = api_key
         self.logger = logger
+        self._connection_tested = False  # Cache connection test result
+        self._connection_ok = False
     
-    def test_connection(self):
-        """Test connection to WordPress API"""
+    def test_connection(self, force=False):
+        """Test connection to WordPress API (cached after first success)"""
+        # Use cached result unless force=True
+        if self._connection_tested and not force:
+            return self._connection_ok, {'cached': True}
+        
         try:
             response = requests.get(
                 f"{self.wordpress_url}/wp-json/crawler/v1/health",
@@ -20,9 +26,15 @@ class WordPressAPI:
             )
             if response.status_code == 200:
                 data = response.json()
+                self._connection_tested = True
+                self._connection_ok = True
                 return True, data
+            self._connection_tested = True
+            self._connection_ok = False
             return False, f"Status code: {response.status_code}"
         except Exception as e:
+            self._connection_tested = True
+            self._connection_ok = False
             return False, str(e)
     
     def create_story(self, story_data):
@@ -108,3 +120,29 @@ class WordPressAPI:
             }
         else:
             raise Exception(f"Failed to create chapter: {response.status_code} - {response.text}")
+    
+    def create_chapters_bulk(self, chapters_data):
+        """Create multiple chapters in a single API call (OPTIMIZATION)"""
+        try:
+            response = requests.post(
+                f"{self.wordpress_url}/wp-json/crawler/v1/chapters/bulk",
+                headers={'X-API-Key': self.api_key},
+                json={'chapters': chapters_data},
+                timeout=120  # Longer timeout for bulk operations
+            )
+            
+            if response.status_code in [200, 201]:
+                result = response.json()
+                return {
+                    'success': True,
+                    'results': result.get('results', []),
+                    'created': result.get('created', 0),
+                    'existed': result.get('existed', 0),
+                    'failed': result.get('failed', 0)
+                }
+            else:
+                # Fallback to individual creation
+                return {'success': False, 'error': response.text}
+        except Exception as e:
+            # Fallback to individual creation
+            return {'success': False, 'error': str(e)}

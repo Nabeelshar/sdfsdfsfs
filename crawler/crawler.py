@@ -52,6 +52,9 @@ class NovelCrawler:
         self.parser = NovelParser(self.log)
         self.wordpress = WordPressAPI(self.wordpress_url, self.api_key, self.log)
         self.file_manager = FileManager(self.log)
+        
+        # OPTIMIZATION: Batch configuration
+        self.bulk_chapter_size = self.config.get('bulk_chapter_size', 25)  # Create chapters in batches
     
     def log(self, message):
         """Print log message with Unicode error handling"""
@@ -59,6 +62,70 @@ class NovelCrawler:
             print(message)
         except UnicodeEncodeError:
             print(message.encode('ascii', 'replace').decode('ascii'))
+    
+    def process_chapters_in_batches(self, chapters_data, story_id, novel_url, total_chapters):
+        """
+        Process chapters in batches for optimal performance
+        CRITICAL: Maintains sequential order of chapters
+        """
+        total_to_process = len(chapters_data)
+        chapters_created = 0
+        chapters_existed = 0
+        
+        # Process in batches
+        for batch_start in range(0, total_to_process, self.bulk_chapter_size):
+            batch_end = min(batch_start + self.bulk_chapter_size, total_to_process)
+            batch = chapters_data[batch_start:batch_end]
+            
+            batch_num = (batch_start // self.bulk_chapter_size) + 1
+            total_batches = (total_to_process + self.bulk_chapter_size - 1) // self.bulk_chapter_size
+            
+            self.log(f"\n  📦 Batch {batch_num}/{total_batches}: Creating chapters {batch[0]['chapter_number']}-{batch[-1]['chapter_number']}...")
+            
+            # Try bulk creation first
+            bulk_result = self.wordpress.create_chapters_bulk(batch)
+            
+            if bulk_result['success']:
+                # Bulk creation succeeded
+                self.log(f"    ✓ Batch complete: {bulk_result['created']} created, {bulk_result['existed']} existed, {bulk_result['failed']} failed ({len(batch)} total)")
+                chapters_created += bulk_result['created']
+                chapters_existed += bulk_result['existed']
+                
+                # Update progress after each batch
+                last_chapter_num = batch[-1]['chapter_number']
+                self.file_manager.update_novel_progress(
+                    novel_url, 'in_progress',
+                    chapters_crawled=last_chapter_num,
+                    chapters_total=total_chapters,
+                    story_id=story_id
+                )
+            else:
+                # Fallback to individual creation (maintains order)
+                self.log(f"    ⚠ Bulk failed, falling back to individual creation...")
+                for chapter_data in batch:
+                    try:
+                        chapter_result = self.wordpress.create_chapter(chapter_data)
+                        if chapter_result.get('existed'):
+                            chapters_existed += 1
+                        else:
+                            chapters_created += 1
+                        
+                        # Update progress after each chapter
+                        self.file_manager.update_novel_progress(
+                            novel_url, 'in_progress',
+                            chapters_crawled=chapter_data['chapter_number'],
+                            chapters_total=total_chapters,
+                            story_id=story_id
+                        )
+                    except Exception as e:
+                        self.log(f"    ✗ Failed chapter {chapter_data['chapter_number']}: {e}")
+                        raise  # Stop on error to maintain sequence
+            
+            # Delay between batches (not after last batch)
+            if batch_end < total_to_process:
+                time.sleep(self.delay)
+        
+        return chapters_created, chapters_existed
     
     def crawl_category(self, category_url, max_pages=None):
         """Crawl all novels from a category page with pagination"""
@@ -170,11 +237,12 @@ class NovelCrawler:
             self.log(f"  Continuing from chapter {resume_from_chapter + 1}")
             self.log(f"  Progress: {resume_from_chapter}/{novel_progress.get('chapters_total')} chapters")
         
-        # Step 1: Test WordPress connection
+        # Step 1: Test WordPress connection (CACHED after first success)
         self.log("[1/6] Testing WordPress API connection...")
         success, result = self.wordpress.test_connection()
         if success:
-            self.log(f"  Connected (WordPress v{result.get('wordpress', 'unknown')})")
+            cached_indicator = " (cached)" if result.get('cached') else ""
+            self.log(f"  Connected{cached_indicator} (WordPress v{result.get('wordpress', 'unknown')})")
         else:
             self.log(f"  Failed: {result}")
             return
@@ -302,13 +370,10 @@ class NovelCrawler:
         self.wordpress.create_story(story_data_final)
         
         # Step 6: Process chapters
-        self.log(f"\n[6/6] Processing chapters (max {self.max_chapters})...")
+        self.log(f"\n[6/6] Processing chapters (max {self.max_chapters}, batches of {self.bulk_chapter_size})...")
         
         # Create chapter directories
         self.file_manager.create_directories(novel_id)
-        
-        chapters_created = 0
-        chapters_existed = 0
         
         # Store novel titles for chapter filenames
         novel_title_raw = novel_data['title']
@@ -335,6 +400,11 @@ class NovelCrawler:
             # Fallback: will check individually
             self.log("  Bulk check unavailable - checking chapters individually")
             existing_chapter_set = None
+        
+        # PHASE 1: Crawl and translate all chapters (sequential to maintain order)
+        self.log(f"\n  Phase 1: Crawling & translating chapters...")
+        prepared_chapters = []  # List to store prepared chapter data in order
+        chapters_existed = 0
         
         for idx, chapter in enumerate(chapters_to_process, start=start_chapter):
             self.log(f"\n  Chapter {idx}/{len(novel_data['chapters'])}: {chapter['title']}")
@@ -421,7 +491,7 @@ class NovelCrawler:
             translated_filename = self.file_manager.save_chapter(novel_id, idx, translated_title, translated_content, novel_title_translated, is_translated=True)
             self.log(f"    Saved to {translated_filename}")
             
-            # Create chapter in WordPress with formatted title and retry logic
+            # Prepare chapter data for batch creation (maintain order)
             chapter_wordpress_title = f"{novel_title_translated} Chapter {idx}"
             chapter_data = {
                 'title': chapter_wordpress_title,
@@ -429,68 +499,23 @@ class NovelCrawler:
                 'content': translated_content,
                 'story_id': story_id,
                 'url': chapter['url'],
-                'chapter_number': idx
+                'chapter_number': idx  # CRITICAL: ensures sequential order
             }
-            
-            # Debug: print what we're sending
-            if idx == 6:  # Only for chapter 6 to avoid spam
-                self.log(f"    DEBUG: Sending story_id={story_id} (type: {type(story_id).__name__})")
-            
-            # Retry chapter creation with exponential backoff
-            max_retries = 10
-            retry_delay = 0
-            chapter_created = False
-            
-            for attempt in range(max_retries):
-                try:
-                    if attempt > 0:
-                        self.log(f"    WordPress retry {attempt}/{max_retries} (waiting {retry_delay}s)...")
-                        time.sleep(retry_delay)
-                    
-                    chapter_result = self.wordpress.create_chapter(chapter_data)
-                    if chapter_result.get('existed'):
-                        self.log(f"    Already exists in WordPress (ID: {chapter_result['id']})")
-                        chapters_existed += 1
-                    else:
-                        self.log(f"    Created in WordPress (ID: {chapter_result['id']})")
-                        chapters_created += 1
-                    chapter_created = True
-                    break
-                except Exception as e:
-                    self.log(f"    WordPress error: {e}")
-                    if attempt < max_retries - 1:
-                        retry_delay = min(600, 2 ** attempt)  # Max 10 minutes
-                    else:
-                        self.log(f"    CRITICAL: Chapter creation failed after {max_retries} attempts")
-                        self.log(f"    STOPPING: Cannot proceed without creating chapter {idx}")
-                        return
-            
-            if not chapter_created:
-                self.log(f"    CRITICAL: Failed to create chapter {idx} in WordPress")
-                self.log(f"    STOPPING: Chapter sequence is critical, cannot continue")
-                # Update progress before stopping
-                self.file_manager.update_novel_progress(
-                    novel_url, 'failed', 
-                    chapters_crawled=idx-1, 
-                    chapters_total=len(novel_data['chapters']),
-                    story_id=story_id
-                )
-                return
-            
-            # Update progress after each successful chapter
-            self.file_manager.update_novel_progress(
-                novel_url, 'in_progress',
-                chapters_crawled=idx,
-                chapters_total=len(novel_data['chapters']),
-                story_id=story_id
+            prepared_chapters.append(chapter_data)
+            self.log(f"    ✓ Prepared for batch upload")
+        
+        # PHASE 2: Batch upload to WordPress (maintains sequential order)
+        if prepared_chapters:
+            self.log(f"\n  Phase 2: Uploading {len(prepared_chapters)} chapters to WordPress...")
+            chapters_created, chapters_uploaded_existed = self.process_chapters_in_batches(
+                prepared_chapters, story_id, novel_url, len(novel_data['chapters'])
             )
-            
-            # Delay between requests (but not after the last chapter in this batch)
-            if idx < end_chapter:
-                time.sleep(self.delay)
+        else:
+            chapters_created = 0
+            chapters_uploaded_existed = 0
         
         # Determine if novel is completed or just reached max_chapters limit
-        total_chapters_crawled = chapters_created + chapters_existed
+        total_chapters_crawled = chapters_created + chapters_existed + chapters_uploaded_existed
         if total_chapters_crawled >= len(novel_data['chapters']):
             # All chapters processed - mark as completed
             status = 'completed'
@@ -512,9 +537,9 @@ class NovelCrawler:
         self.log("Crawling Complete!")
         self.log("="*50)
         self.log(f"Story ID: {story_id}")
-        self.log(f"Chapters created: {chapters_created}")
-        self.log(f"Chapters existed: {chapters_existed}")
-        self.log(f"Total processed: {chapters_created + chapters_existed}")
+        self.log(f"Chapters created (new): {chapters_created}")
+        self.log(f"Chapters existed (skipped): {chapters_existed + chapters_uploaded_existed}")
+        self.log(f"Total processed: {chapters_created + chapters_existed + chapters_uploaded_existed}")
         self.log("")
 
 

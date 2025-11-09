@@ -4,6 +4,7 @@
   "google_project_id": "",
   "google_credentials_file": "",
   "max_chapters_per_run": 999,
+  "bulk_chapter_size": 25,
   "delay_between_requests": 2,
   "translate": true,
   "target_language": "en"

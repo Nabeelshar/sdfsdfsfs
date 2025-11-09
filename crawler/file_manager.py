@@ -101,3 +101,27 @@ class FileManager:
             'last_updated': datetime.datetime.now().isoformat()
         }
         self.save_crawler_state(state)
+    
+    def get_local_chapter_cache(self, story_id):
+        """Get cached chapter numbers for a story (avoids WordPress API calls)"""
+        state = self.load_crawler_state()
+        cache_key = f'story_{story_id}_chapters'
+        return state.get('chapter_cache', {}).get(cache_key, set())
+    
+    def update_local_chapter_cache(self, story_id, chapter_numbers):
+        """Update local cache of chapter numbers for a story"""
+        state = self.load_crawler_state()
+        if 'chapter_cache' not in state:
+            state['chapter_cache'] = {}
+        cache_key = f'story_{story_id}_chapters'
+        # Convert set to list for JSON serialization
+        if isinstance(chapter_numbers, set):
+            chapter_numbers = list(chapter_numbers)
+        state['chapter_cache'][cache_key] = chapter_numbers
+        self.save_crawler_state(state)
+    
+    def add_chapter_to_cache(self, story_id, chapter_number):
+        """Add a single chapter to the cache"""
+        cached = set(self.get_local_chapter_cache(story_id))
+        cached.add(chapter_number)
+        self.update_local_chapter_cache(story_id, cached)
