@@ -3,6 +3,8 @@ WordPress REST API client
 """
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class WordPressAPI:
@@ -12,6 +14,29 @@ class WordPressAPI:
         self.logger = logger
         self._connection_tested = False  # Cache connection test result
         self._connection_ok = False
+        
+        # OPTIMIZATION: Use session with connection pooling and retry logic
+        self.session = requests.Session()
+        
+        # Configure retry strategy for transient errors
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"]
+        )
+        
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=10,  # Keep connections alive
+            pool_maxsize=20       # Max concurrent connections
+        )
+        
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+        # Set default headers
+        self.session.headers.update({'X-API-Key': self.api_key})
     
     def test_connection(self, force=False):
         """Test connection to WordPress API (cached after first success)"""
@@ -20,7 +45,7 @@ class WordPressAPI:
             return self._connection_ok, {'cached': True}
         
         try:
-            response = requests.get(
+            response = self.session.get(
                 f"{self.wordpress_url}/wp-json/crawler/v1/health",
                 timeout=10
             )
@@ -39,9 +64,8 @@ class WordPressAPI:
     
     def create_story(self, story_data):
         """Create or get existing story in WordPress"""
-        response = requests.post(
+        response = self.session.post(
             f"{self.wordpress_url}/wp-json/crawler/v1/story",
-            headers={'X-API-Key': self.api_key},
             json=story_data,
             timeout=30
         )
@@ -58,9 +82,8 @@ class WordPressAPI:
     def get_story_chapter_status(self, story_id, total_chapters):
         """Get bulk status of all chapters for a story (FAST!)"""
         try:
-            response = requests.get(
+            response = self.session.get(
                 f"{self.wordpress_url}/wp-json/crawler/v1/story/{story_id}/chapters",
-                headers={'X-API-Key': self.api_key},
                 params={'total_chapters': total_chapters},
                 timeout=15
             )
@@ -83,9 +106,8 @@ class WordPressAPI:
     def check_chapter_exists(self, story_id, chapter_number):
         """Check if chapter already exists in WordPress"""
         try:
-            response = requests.get(
+            response = self.session.get(
                 f"{self.wordpress_url}/wp-json/crawler/v1/chapter/exists",
-                headers={'X-API-Key': self.api_key},
                 params={'story_id': story_id, 'chapter_number': chapter_number},
                 timeout=10
             )
@@ -105,9 +127,8 @@ class WordPressAPI:
     
     def create_chapter(self, chapter_data):
         """Create chapter in WordPress"""
-        response = requests.post(
+        response = self.session.post(
             f"{self.wordpress_url}/wp-json/crawler/v1/chapter",
-            headers={'X-API-Key': self.api_key},
             json=chapter_data,
             timeout=30
         )
@@ -124,11 +145,10 @@ class WordPressAPI:
     def create_chapters_bulk(self, chapters_data):
         """Create multiple chapters in a single API call (OPTIMIZATION)"""
         try:
-            response = requests.post(
+            response = self.session.post(
                 f"{self.wordpress_url}/wp-json/crawler/v1/chapters/bulk",
-                headers={'X-API-Key': self.api_key},
                 json={'chapters': chapters_data},
-                timeout=120  # Longer timeout for bulk operations
+                timeout=180  # Longer timeout for bulk operations (increased from 120)
             )
             
             if response.status_code in [200, 201]:

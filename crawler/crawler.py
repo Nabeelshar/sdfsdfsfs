@@ -54,7 +54,7 @@ class NovelCrawler:
         self.file_manager = FileManager(self.log)
         
         # OPTIMIZATION: Batch configuration
-        self.bulk_chapter_size = self.config.get('bulk_chapter_size', 25)  # Create chapters in batches
+        self.bulk_chapter_size = self.config.get('bulk_chapter_size', 50)  # Create chapters in batches (increased from 25)
     
     def log(self, message):
         """Print log message with Unicode error handling"""
@@ -326,8 +326,11 @@ class NovelCrawler:
                 return
             else:
                 self.log(f"  Novel incomplete ({chapter_status['chapters_count']}/{len(novel_data['chapters'])} chapters) - continuing...")
+                # Store chapter status for later use to avoid re-checking
+                existing_chapter_set = set(chapter_status.get('existing_chapters', []))
         else:
             self.log(f"  Story created (ID: {story_id})")
+            existing_chapter_set = set()  # New story, no chapters exist
         
         # Only download cover if we're processing chapters
         self.log("\n[5/6] Downloading cover...")
@@ -387,19 +390,23 @@ class NovelCrawler:
         if resume_from_chapter > 0:
             self.log(f"  Resuming from chapter {start_chapter} to {end_chapter}")
         
-        # Get existing chapters (already checked in step 5, but get details for processing)
-        chapter_status = self.wordpress.get_story_chapter_status(story_id, len(novel_data['chapters']))
-        
-        if chapter_status['success']:
-            if chapter_status['chapters_count'] > 0:
-                self.log(f"  Found {chapter_status['chapters_count']} existing chapters - will skip those")
-                existing_chapter_set = set(chapter_status['existing_chapters'])
+        # Use cached chapter status from Step 5 to avoid redundant API call
+        if 'existing_chapter_set' not in locals():
+            # Only check if we didn't already get it in Step 5
+            chapter_status = self.wordpress.get_story_chapter_status(story_id, len(novel_data['chapters']))
+            
+            if chapter_status['success']:
+                if chapter_status['chapters_count'] > 0:
+                    self.log(f"  Found {chapter_status['chapters_count']} existing chapters - will skip those")
+                    existing_chapter_set = set(chapter_status['existing_chapters'])
+                else:
+                    existing_chapter_set = set()
             else:
-                existing_chapter_set = set()
+                # Fallback: will check individually
+                self.log("  Bulk check unavailable - checking chapters individually")
+                existing_chapter_set = None
         else:
-            # Fallback: will check individually
-            self.log("  Bulk check unavailable - checking chapters individually")
-            existing_chapter_set = None
+            self.log(f"  Using cached chapter status (avoids API call)")
         
         # PHASE 1: Crawl and translate all chapters (sequential to maintain order)
         self.log(f"\n  Phase 1: Crawling & translating chapters...")
